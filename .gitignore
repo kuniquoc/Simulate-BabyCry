@@ -1,0 +1,26 @@
+# Node.js dependencies
+PushNotification/node_modules/
+PushNotification/*.log
+
+# Python dependencies
+IOT/__pycache__/
+IOT/*.pyc
+IOT/*.pyo
+IOT/.env
+
+# Audio chunks and temporary files
+IOT/recorded_chunks/
+IOT/*.wav
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE-specific files
+.vscode/
+.idea/

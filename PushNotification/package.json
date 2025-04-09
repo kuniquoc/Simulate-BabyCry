@@ -1,0 +1,21 @@
+{
+    "name": "push-notification-app",
+    "version": "1.0.0",
+    "description": "A web application for push notifications based on AI cry detection.",
+    "main": "server/server.js",
+    "scripts": {
+        "start": "node server/server.js",
+        "dev": "nodemon server/server.js"
+    },
+    "dependencies": {
+        "body-parser": "^1.20.2",
+        "cors": "^2.8.5",
+        "express": "^4.18.2",
+        "push-notification-app": "file:"
+    },
+    "devDependencies": {
+        "nodemon": "^2.0.22"
+    },
+    "author": "",
+    "license": "ISC"
+}
