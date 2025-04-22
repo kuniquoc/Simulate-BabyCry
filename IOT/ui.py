@@ -1,8 +1,5 @@
 import tkinter as tk
-import threading
 from tkinter import ttk
-import os
-
 class RecorderUI:
     def __init__(self, root, recorder):
         self.root = root
@@ -43,14 +40,14 @@ class RecorderUI:
         chunks_label = ttk.Label(info_frame, textvariable=self.chunks_var)
         chunks_label.pack(pady=5)
         
-        # API status frame
-        api_frame = ttk.Frame(main_frame)
-        api_frame.pack(fill=tk.X, pady=5)
+        # WebSocket status frame
+        ws_frame = ttk.Frame(main_frame)
+        ws_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Label(api_frame, text="API Status:").pack(side=tk.LEFT, padx=5)
-        self.api_status_var = tk.StringVar(value="Not connected")
-        self.api_status_label = ttk.Label(api_frame, textvariable=self.api_status_var, foreground="orange")
-        self.api_status_label.pack(side=tk.LEFT)
+        ttk.Label(ws_frame, text="WebSocket Status:").pack(side=tk.LEFT, padx=5)
+        self.ws_status_var = tk.StringVar(value="Not connected")
+        self.ws_status_label = ttk.Label(ws_frame, textvariable=self.ws_status_var, foreground="orange")
+        self.ws_status_label.pack(side=tk.LEFT)
         
         # Buttons frame
         buttons_frame = ttk.Frame(main_frame)
@@ -62,7 +59,7 @@ class RecorderUI:
         self.exit_button = ttk.Button(buttons_frame, text="Exit", command=self.on_exit)
         self.exit_button.pack(side=tk.LEFT, padx=5, expand=True)
         
-        # Update chunk counter and API status periodically
+        # Update chunk counter and WebSocket status periodically
         self.update_ui_info()
         
     def toggle_recording(self):
@@ -81,17 +78,17 @@ class RecorderUI:
         # Update chunk counter
         self.chunks_var.set(f"Processed Chunks: {self.recorder.save_counter}")
         
-        # Update API status
-        api_status = self.recorder.last_api_status
-        self.api_status_var.set(api_status)
+        # Update WebSocket status
+        ws_status = self.recorder.last_ws_status
+        self.ws_status_var.set(ws_status)
         
         # Set color based on status
-        if "Success" in api_status:
-            self.api_status_label.config(foreground="green")
-        elif "Error" in api_status:
-            self.api_status_label.config(foreground="red")
+        if "Connected" in ws_status or "Data sent" in ws_status:
+            self.ws_status_label.config(foreground="green")
+        elif "Error" in ws_status or "Disconnected" in ws_status:
+            self.ws_status_label.config(foreground="red")
         else:
-            self.api_status_label.config(foreground="orange")
+            self.ws_status_label.config(foreground="orange")
         
         # Schedule next update
         self.root.after(500, self.update_ui_info)

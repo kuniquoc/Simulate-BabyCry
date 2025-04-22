@@ -4,11 +4,11 @@ import wave
 import time
 import threading
 import queue
-import os
-import requests
 import base64
 import json
 from io import BytesIO
+import websocket
+import logging
 
 class AudioRecorder:
     """
@@ -20,7 +20,7 @@ class AudioRecorder:
     """
     def __init__(self, chunk_size=1024, sample_rate=16000, channels=1, 
                  window_size=3, slide_size=1, format=pyaudio.paInt16,
-                 api_url="http://localhost:8000/predict_with_timestamp"):
+                 ws_url="ws://localhost:8000/ws/audio_client"):
         """
         Initialize the AudioRecorder with the specified parameters.
         
@@ -31,148 +31,139 @@ class AudioRecorder:
             window_size (int): Size of each audio segment in seconds (default 3)
             slide_size (int): How much the window slides each time in seconds (default 1)
             format: PyAudio format constant
-            api_url (str): URL of the API endpoint to send audio data
+            ws_url (str): URL of the WebSocket endpoint
         """
         self.chunk_size = chunk_size
         self.sample_rate = sample_rate
         self.channels = channels
         self.format = format
-        self.window_size = window_size  # in seconds
-        self.slide_size = slide_size    # in seconds
-        self.api_url = api_url
+        self.window_size = window_size
+        self.slide_size = slide_size
+        self.ws_url = ws_url
         
         self.audio = pyaudio.PyAudio()
         self.stream = None
         self.is_recording = False
         self.audio_buffer = []
         self.buffer_lock = threading.Lock()
-        self.frames_per_window = int(sample_rate * window_size)  # Total frames in window (e.g., 48000 frames for 3s at 16kHz)
-        self.frames_per_slide = int(sample_rate * slide_size)    # Frames to slide (e.g., 16000 frames for 1s at 16kHz)
+        self.frames_per_window = int(sample_rate * window_size)
+        self.frames_per_slide = int(sample_rate * slide_size)
         self.chunk_queue = queue.Queue()
         self.save_counter = 0
         self.processing_thread = None
-        self.last_api_status = "Not connected"
         
-    def start_recording(self):
+        # WebSocket related attributes
+        self.ws = None
+        self.ws_connected = False
+        self.ws_thread = None
+        self.last_ws_status = "Not connected"
+
+    def connect_websocket(self):
         """
-        Start recording audio from the microphone.
-        Creates a new thread for processing the audio in sliding windows.
+        Establish WebSocket connection with the server.
+        
+        This method initializes the WebSocket connection and sets up all the necessary
+        callback handlers for WebSocket events (message, error, close, open).
+        Runs the WebSocket connection in a separate daemon thread.
         """
-        if self.is_recording:
-            return
-            
-        self.is_recording = True
-        self.audio_buffer = []
-        
-        def callback(in_data, frame_count, time_info, status):
-            """
-            Callback function for PyAudio. Receives audio data from the microphone.
-            """
-            self.audio_buffer.append(np.frombuffer(in_data, dtype=np.int16))
-            return (in_data, pyaudio.paContinue)
-            
-        self.stream = self.audio.open(
-            format=self.format,
-            channels=self.channels,
-            rate=self.sample_rate,
-            input=True,
-            frames_per_buffer=self.chunk_size,
-            stream_callback=callback
-        )
-        
-        # Start a thread to process audio in sliding windows
-        self.processing_thread = threading.Thread(target=self._process_audio)
-        self.processing_thread.daemon = True
-        self.processing_thread.start()
-        
-    def _process_audio(self):
+        try:
+            websocket.enableTrace(True)
+            self.ws = websocket.WebSocketApp(
+                self.ws_url,
+                on_message=self._on_ws_message,
+                on_error=self._on_ws_error,
+                on_close=self._on_ws_close,
+                on_open=self._on_ws_open
+            )
+            self.ws_thread = threading.Thread(target=self.ws.run_forever)
+            self.ws_thread.daemon = True
+            self.ws_thread.start()
+        except Exception as e:
+            logging.error(f"WebSocket connection error: {str(e)}")
+            self.ws_connected = False
+            self.last_ws_status = f"Connection error: {str(e)}"
+
+    def _on_ws_message(self, ws, message):
         """
-        Process audio in sliding windows.
+        Handle incoming WebSocket messages.
         
-        This method continuously monitors the audio buffer. Once enough data 
-        is collected for a window (e.g., 3 seconds), it processes that window
-        and then slides forward by slide_size (e.g., 1 second) to prepare for
-        the next window.
-        """
-        frames_accumulated = 0
-        samples_per_chunk = self.chunk_size
-        buffer_ready = False  # Flag to indicate if we have enough data for a full window
+        Processes messages received from the server, including predictions and alerts.
+        Updates the connection status based on the message type.
         
-        while self.is_recording:
-            if len(self.audio_buffer) > 0:
-                with self.buffer_lock:
-                    # Tính tổng số khung âm thanh đã tích lũy
-                    total_samples_in_buffer = sum(len(chunk) for chunk in self.audio_buffer)
-                    frames_accumulated = total_samples_in_buffer
-                    
-                    # Kiểm tra nếu đủ dữ liệu cho một cửa sổ
-                    if not buffer_ready and frames_accumulated >= self.frames_per_window:
-                        buffer_ready = True
-                    
-                    # Chỉ xử lý cửa sổ khi có đủ dữ liệu
-                    if buffer_ready and frames_accumulated >= self.frames_per_window:
-                        # Ghép tất cả các chunk thành một mảng duy nhất
-                        flat_buffer = np.concatenate(self.audio_buffer)
-                        
-                        # Trích xuất cửa sổ cuối cùng (3 giây)
-                        window_data = flat_buffer[-self.frames_per_window:]
-                        
-                        # Kiểm tra độ dài của cửa sổ trước khi xử lý
-                        if len(window_data) == self.frames_per_window:
-                            self.process_window(window_data)
-                        else:
-                            print("Not enough data for a full window. Waiting for more data...")
-                            continue
-                        
-                        # Xóa đúng số lượng khung âm thanh tương ứng với slide_size
-                        samples_to_remove = self.frames_per_slide
-                        while samples_to_remove > 0 and len(self.audio_buffer) > 0:
-                            if len(self.audio_buffer[0]) <= samples_to_remove:
-                                samples_to_remove -= len(self.audio_buffer[0])
-                                self.audio_buffer.pop(0)
-                            else:
-                                self.audio_buffer[0] = self.audio_buffer[0][samples_to_remove:]
-                                samples_to_remove = 0
-                        
-                        # Cập nhật frames_accumulated sau khi xóa
-                        frames_accumulated = sum(len(chunk) for chunk in self.audio_buffer)
-                        
-            time.sleep(0.1)  # Prevent CPU overuse
-    
-    def process_window(self, window_data):
-        """
-        Process a 3-second window of audio data.
-        
-        This method handles each sliding window of audio data.
-        For example, with a 3-second window and 1-second slide:
-          - First window: 0-3 seconds
-          - Second window: 1-4 seconds
-          - Third window: 2-5 seconds
-          
         Args:
-            window_data (numpy.ndarray): Audio data for the current window (3 seconds)
+            ws: WebSocket connection instance
+            message: Message received from the server
         """
-        # Put the window in a queue for further processing
-        self.chunk_queue.put(window_data)
-        
-        # Send to API using a separate thread to avoid blocking
-        send_thread = threading.Thread(
-            target=self.send_to_api, 
-            args=(window_data, f"audio_chunk_{self.save_counter}")
-        )
-        send_thread.daemon = True
-        send_thread.start()
-        
-        self.save_counter += 1
-        
-    def send_to_api(self, audio_data, chunk_id):
+        try:
+            data = json.loads(message)
+            if data.get("type") == "prediction":
+                print(f"Prediction received: {data}")
+                self.last_ws_status = "Prediction received"
+            elif data.get("type") == "alert":
+                print(f"Alert received: {data}")
+                self.last_ws_status = "Alert received"
+            elif "error" in data:
+                print(f"Error from server: {data['error']}")
+                self.last_ws_status = f"Server error: {data['error']}"
+        except Exception as e:
+            print(f"Error processing WebSocket message: {e}")
+
+    def _on_ws_error(self, ws, error):
         """
-        Send audio data to an external API.
+        Handle WebSocket errors.
+        
+        Updates connection status and logs the error when a WebSocket error occurs.
+        
+        Args:
+            ws: WebSocket connection instance
+            error: Error information
+        """
+        print(f"WebSocket error: {error}")
+        self.ws_connected = False
+        self.last_ws_status = f"Error: {error}"
+
+    def _on_ws_close(self, ws, close_status_code, close_msg):
+        """
+        Handle WebSocket connection close.
+        
+        Updates connection status when the WebSocket connection is closed.
+        
+        Args:
+            ws: WebSocket connection instance
+            close_status_code: Status code for the connection closure
+            close_msg: Message describing why the connection was closed
+        """
+        print(f"WebSocket connection closed: {close_msg}")
+        self.ws_connected = False
+        self.last_ws_status = "Disconnected"
+
+    def _on_ws_open(self, ws):
+        """
+        Handle WebSocket connection open.
+        
+        Updates connection status when the WebSocket connection is successfully established.
+        
+        Args:
+            ws: WebSocket connection instance
+        """
+        print("WebSocket connection established")
+        self.ws_connected = True
+        self.last_ws_status = "Connected"
+
+    def send_to_websocket(self, audio_data, chunk_id):
+        """
+        Send audio data through WebSocket connection.
+        
+        Converts audio data to WAV format, encodes it as base64, and sends it through
+        the WebSocket connection with appropriate metadata.
         
         Args:
             audio_data (numpy.ndarray): Audio data to send (3 seconds)
             chunk_id (str): Identifier for this audio chunk
         """
+        if not self.ws_connected:
+            return
+
         try:
             # Convert audio data to WAV format in memory
             buffer = BytesIO()
@@ -187,7 +178,7 @@ class AudioRecorder:
             buffer.seek(0)
             wav_data = buffer.read()
             
-            # Encode the WAV data as base64 for sending via JSON
+            # Encode the WAV data as base64
             encoded_data = base64.b64encode(wav_data).decode('utf-8')
             
             # Prepare the payload
@@ -199,66 +190,151 @@ class AudioRecorder:
                 'audio_data': encoded_data
             }
             
-            # Send to the API
-            response = requests.post(
-                self.api_url, 
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=5
-            )
-
-            print({response.status_code})
-            
-            # Update status with response info
-            if response.status_code == 200:
-                self.last_api_status = f"Success ({response.status_code})"
-            else:
-                self.last_api_status = f"Error ({response.status_code})"
-                
-            # Log the response (could be extended for more detailed handling)
-            print(f"API Response for {chunk_id}: {response.status_code}")
+            # Send through WebSocket
+            self.ws.send(json.dumps(payload))
+            self.last_ws_status = "Data sent"
             
         except Exception as e:
-            self.last_api_status = f"Error: {str(e)}"
-            print(f"Error sending audio to API: {e}")
-    
-    def save_to_wav(self, audio_data, filename):
+            print(f"Error sending audio through WebSocket: {e}")
+            self.ws_connected = False
+            self.last_ws_status = f"Send error: {str(e)}"
+
+    def start_recording(self):
         """
-        Save audio data to a WAV file (kept for backward compatibility).
+        Start recording audio and establish WebSocket connection.
+        
+        This method:
+        1. Connects to the WebSocket server
+        2. Initializes the audio buffer
+        3. Sets up the PyAudio stream with callback
+        4. Starts the audio processing thread
+        """
+        if self.is_recording:
+            return
+            
+        # Connect to WebSocket first
+        self.connect_websocket()
+        
+        self.is_recording = True
+        self.audio_buffer = []
+        
+        def callback(in_data, frame_count, time_info, status):
+            self.audio_buffer.append(np.frombuffer(in_data, dtype=np.int16))
+            return (in_data, pyaudio.paContinue)
+            
+        self.stream = self.audio.open(
+            format=self.format,
+            channels=self.channels,
+            rate=self.sample_rate,
+            input=True,
+            frames_per_buffer=self.chunk_size,
+            stream_callback=callback
+        )
+        
+        self.processing_thread = threading.Thread(target=self._process_audio)
+        self.processing_thread.daemon = True
+        self.processing_thread.start()
+        
+    def _process_audio(self):
+        """
+        Process audio in sliding windows.
+        
+        This method continuously monitors the audio buffer. Once enough data 
+        is collected for a window (e.g., 3 seconds), it processes that window
+        and then slides forward by slide_size (e.g., 1 second) to prepare for
+        the next window.
+        
+        This runs in a separate thread to avoid blocking the main thread.
+        """
+        frames_accumulated = 0
+        samples_per_chunk = self.chunk_size
+        buffer_ready = False
+        
+        while self.is_recording:
+            if len(self.audio_buffer) > 0:
+                with self.buffer_lock:
+                    total_samples_in_buffer = sum(len(chunk) for chunk in self.audio_buffer)
+                    frames_accumulated = total_samples_in_buffer
+                    
+                    if not buffer_ready and frames_accumulated >= self.frames_per_window:
+                        buffer_ready = True
+                    
+                    if buffer_ready and frames_accumulated >= self.frames_per_window:
+                        flat_buffer = np.concatenate(self.audio_buffer)
+                        window_data = flat_buffer[-self.frames_per_window:]
+                        
+                        if len(window_data) == self.frames_per_window:
+                            self.process_window(window_data)
+                        else:
+                            print("Not enough data for a full window. Waiting for more data...")
+                            continue
+                        
+                        samples_to_remove = self.frames_per_slide
+                        while samples_to_remove > 0 and len(self.audio_buffer) > 0:
+                            if len(self.audio_buffer[0]) <= samples_to_remove:
+                                samples_to_remove -= len(self.audio_buffer[0])
+                                self.audio_buffer.pop(0)
+                            else:
+                                self.audio_buffer[0] = self.audio_buffer[0][samples_to_remove:]
+                                samples_to_remove = 0
+                        
+                        frames_accumulated = sum(len(chunk) for chunk in self.audio_buffer)
+                        
+            time.sleep(0.1)
+    
+    def process_window(self, window_data):
+        """
+        Process a single window of audio data.
+        
+        Takes a window of audio data and sends it through WebSocket if connected.
+        Each window is sent in a separate thread to avoid blocking.
         
         Args:
-            audio_data (numpy.ndarray): Audio data to save (3 seconds)
-            filename (str): Name of the output file
+            window_data (numpy.ndarray): Audio data for the current window (3 seconds)
         """
-        directory = "recorded_chunks"
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-            
-        filepath = os.path.join(directory, filename)
-        wf = wave.open(filepath, 'wb')
-        wf.setnchannels(self.channels)
-        wf.setsampwidth(self.audio.get_sample_size(self.format))
-        wf.setframerate(self.sample_rate)
-        wf.writeframes(audio_data.tobytes())
-        wf.close()
+        self.chunk_queue.put(window_data)
+        chunk_id = f"audio_chunk_{self.save_counter}"
+        
+        # Send to WebSocket if connected
+        if self.ws_connected:
+            ws_send_thread = threading.Thread(
+                target=self.send_to_websocket,
+                args=(window_data, chunk_id)
+            )
+            ws_send_thread.daemon = True
+            ws_send_thread.start()
+        
+        self.save_counter += 1
         
     def stop_recording(self):
         """
-        Stop the audio recording and close the audio stream.
+        Stop recording and clean up resources.
+        
+        This method:
+        1. Stops the recording process
+        2. Closes the audio stream
+        3. Closes the WebSocket connection
+        4. Waits for processing threads to finish
         """
         self.is_recording = False
         if self.stream:
             self.stream.stop_stream()
             self.stream.close()
         
-        # Wait for processing thread to finish if it exists
+        if self.ws:
+            self.ws.close()
+        
         if self.processing_thread and self.processing_thread.is_alive():
-            self.processing_thread.join(timeout=1.0)  # Wait up to 1 second
+            self.processing_thread.join(timeout=1.0)
+
+        if self.ws_thread and self.ws_thread.is_alive():
+            self.ws_thread.join(timeout=1.0)
         
     def close(self):
         """
         Close all resources and terminate PyAudio.
-        This should be called when the application exits.
+        
+        This should be called when the application exits to ensure proper cleanup.
         """
         self.stop_recording()
         self.audio.terminate()

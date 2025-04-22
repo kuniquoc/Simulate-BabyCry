@@ -1,3 +1,6 @@
 pyaudio
 numpy
-requests
+websocket-client
+fastapi
+uvicorn
+python-multipart
