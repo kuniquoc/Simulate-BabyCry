@@ -23,7 +23,7 @@ def main():
     and initializes the UI.
     """
     # WebSocket endpoint configuration
-    ws_url = "ws://localhost:8000/ws/audio_client"
+    ws_url = "ws://localhost:8000/ws/3a54299f-37d8-452e-b048-7cb7711fe90f"
     
     # Create output directory for audio chunks if it doesn't exist
     os.makedirs("recorded_chunks", exist_ok=True)

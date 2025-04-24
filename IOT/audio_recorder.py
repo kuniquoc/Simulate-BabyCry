@@ -20,7 +20,7 @@ class AudioRecorder:
     """
     def __init__(self, chunk_size=1024, sample_rate=16000, channels=1, 
                  window_size=3, slide_size=1, format=pyaudio.paInt16,
-                 ws_url="ws://localhost:8000/ws/audio_client"):
+                 ws_url="ws://localhost:8000/ws/3a54299f-37d8-452e-b048-7cb7711fe90f"):
         """
         Initialize the AudioRecorder with the specified parameters.
         
@@ -67,7 +67,7 @@ class AudioRecorder:
         Runs the WebSocket connection in a separate daemon thread.
         """
         try:
-            websocket.enableTrace(True)
+            # websocket.enableTrace(True)
             self.ws = websocket.WebSocketApp(
                 self.ws_url,
                 on_message=self._on_ws_message,
@@ -183,10 +183,10 @@ class AudioRecorder:
             
             # Prepare the payload
             payload = {
-                'chunk_id': chunk_id,
+                # 'chunk_id': chunk_id,
                 'timestamp': time.time(),
-                'sample_rate': self.sample_rate,
-                'channels': self.channels,
+                # 'sample_rate': self.sample_rate,
+                # 'channels': self.channels,
                 'audio_data': encoded_data
             }
             
